@@ -1,0 +1,309 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  OWNER
+  MANAGER
+  EMPLOYEE
+}
+
+enum Plan {
+  STARTER
+  PRO
+  ELITE
+}
+
+enum ServiceType {
+  MOVING
+  STORAGE
+  FULL_SERVICES
+  LABOR
+}
+
+enum JobStatus {
+  PENDING
+  SCHEDULED
+  CONFIRMED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  MISSED 
+  AUTO_ENDED
+}
+
+enum NotificationType {
+  JOB_ASSIGNED
+  JOB_STARTED
+  JOB_COMPLETED
+  JOB_AUTO_ENDED
+  JOB_MISSED
+  SYSTEM
+}
+
+enum JobRole {
+  DRIVER
+  MOVER
+  TEAM_LEAD
+}
+
+enum QuoteStatus {
+  DRAFT
+  SENT
+  SIGNED
+  REJECTED
+  EXPIRED
+}
+
+enum PricingMethod {
+  HOURLY
+  FIXED
+}
+
+enum EmployeePosition {
+  WORKER
+  DRIVER
+  TEAM_LEADER
+  MANAGER
+}
+
+enum EmployeeStatus {
+  PENDING
+  ACTIVE
+  DISABLED
+}
+
+enum EmploymentType {
+  FULL_TIME
+  PART_TIME
+  OCCASIONAL
+}
+
+model Employee {
+  id            String         @id @default(uuid())
+  notifications Notification[]
+  firstName    String
+  lastName     String
+  dateOfBirth  DateTime
+  sinEncrypted String 
+  address String
+  phone   String
+  email   String @unique
+  hireDate       DateTime
+  position       EmployeePosition
+  employmentType EmploymentType
+  hourlyRate     Float
+  confirmedAt    DateTime? 
+  jobs           JobEmployee[]    @relation("EmployeeToJobs")
+  isActive               Boolean        @default(true)
+  status                 EmployeeStatus @default(PENDING)
+  confirmationToken      String?        @unique 
+  companyId              String
+  company                Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  passwordToken          String?
+  passwordTokenExpiresAt DateTime?
+  userId                 String         @unique
+  user                   User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([companyId])
+}
+
+model Company {
+  id String @id @default(uuid())
+  name                String
+  primaryServiceType  ServiceType
+  headquartersAddress String
+  operatingDays      String[]
+  operatingStartTime String
+  operatingEndTime   String
+  payoutMethod       String?
+  plan Plan @default(STARTER)
+  users      User[]
+  customers  Customer[]
+  jobs       Job[]
+  quotations Quotation[]
+  employees  Employee[] 
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model User {
+  id String @id @default(uuid())
+  fullName String
+  email    String    @unique
+  phone    String?
+  password String
+  employee Employee?
+  role Role @default(OWNER)
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  quotations Quotation[]
+  pushToken   String?  
+  createdAt DateTime @default(now())
+}
+
+model Customer {
+  id String @id @default(uuid())
+  fullName String
+  phone    String
+  email    String?
+  pickupAddress  String
+  dropoffAddress String
+  floor          Int
+  elevator       Boolean @default(false)
+  parking        Boolean @default(false)
+  notes          String?
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  quotations Quotation[]
+  createdAt DateTime @default(now())
+  @@index([companyId])
+}
+
+model Quotation {
+  id String @id @default(uuid())
+  quoteNumber Int
+  status      QuoteStatus @default(DRAFT)
+  movingDate    DateTime?
+  startTime     String?
+  startAt       DateTime? 
+  endAt         DateTime?
+  serviceType   ServiceType
+  pricingMethod PricingMethod
+  signedIp      String? 
+  signedDevice  String?
+  workers       Int
+  trucks        Int
+  termsText     String?
+  internalNotes String? 
+  validityDays  Int?
+  estimatedHours     Float?
+  hourlyRate         Float?
+  fixedPrice         Float?
+  materialsCost      Float   @default(0)
+  otherFees          Float   @default(0)
+  discount           Float   @default(0)
+  estimatedVolumeCft Float?
+  estimatedWeightLbs Float? 
+  inventoryNotes     String?
+  travelCost        Float    @default(0)
+  taxTPS            Float    @default(0)
+  taxTVQ            Float    @default(0)
+  total             Float
+  pickupAddress     String?
+  pickupUnit        String?
+  pickupFloor       Int?
+  pickupElevator    Boolean?
+  pickupLoadingDock Boolean?
+  parkingDifficulty String?
+  walkingDistance   Int?
+  stairsWidth       String?
+  pickupAccessNotes String?
+  notes              String?
+  dropoffAddress     String?
+  dropoffUnit        String?
+  dropoffFloor       Int?
+  dropoffElevator    Boolean?
+  dropoffLoadingDock Boolean?
+  dropoffParkingDifficulty String?
+  dropoffWalkingDistance   Int?
+  dropoffStairsWidth       String?
+  dropoffAccessNotes       String?
+  publicToken String? @unique
+  truckSize   String?
+  sentAt DateTime?
+  signedBy  String? 
+  signedAt  DateTime?
+  signature String?
+  expiresAt DateTime?
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id])
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  createdById String
+  createdBy   User   @relation(fields: [createdById], references: [id])
+  job Job?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([companyId, quoteNumber])
+  @@index([companyId])
+}
+
+model Job {
+  id        String @id @default(uuid())
+  jobNumber Int 
+  title        String?
+  status       JobStatus @default(SCHEDULED)
+  totalSeconds Int? // actual job duration in seconds
+  quotationId String    @unique
+  quotation   Quotation @relation(fields: [quotationId], references: [id])
+  startedAt   DateTime?
+  endedAt     DateTime?
+  companyId   String
+  company     Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employees JobEmployee[] @relation("JobToEmployees")
+  createdAt     DateTime       @default(now())
+  notifications Notification[]
+}
+
+model JobEmployee {
+  id String @id @default(uuid())
+  jobId String
+  job   Job    @relation("JobToEmployees", fields: [jobId], references: [id], onDelete: Cascade)
+  employeeId String
+  employee   Employee @relation("EmployeeToJobs", fields: [employeeId], references: [id], onDelete: Cascade)
+  role JobRole
+  assignedAt DateTime @default(now())
+  @@unique([jobId, employeeId])
+}
+
+model Punch {
+  id String @id @default(uuid())
+  employeeId String
+  jobId      String?
+  punchIn  DateTime
+  punchOut DateTime?
+  punchInType  String? // MANUAL | AUTO
+  punchOutType String? // MANUAL | AUTO
+  createdAt DateTime @default(now())
+}
+
+model Notification {
+  id String @id @default(uuid())
+  companyId  String
+  employeeId String
+  title   String
+  message String
+  type    NotificationType
+  jobId String?
+  job   Job?    @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  isRead Boolean @default(false)
+  createdAt DateTime @default(now())
+  employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  @@index([employeeId])
+  @@index([companyId])
+}
+
+model SignupSession {
+  id String @id @default(uuid())
+  companyName         String
+  primaryServiceType  ServiceType
+  headquartersAddress String
+  fullName String
+  email    String
+  phone    String?
+  password String
+  otpVerified Boolean @default(false)
+  operatingDays      String[]
+  operatingStartTime String?
+  operatingEndTime   String?
+  payoutMethod       String?
+  createdAt DateTime @default(now())
+  @@unique([email])
+}
