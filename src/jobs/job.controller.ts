@@ -17,6 +17,7 @@ import { UseGuards } from "@nestjs/common";
 import { JwtGuard } from "../auth/auth1/jwt.guard";
 import { NotificationsService } from "../notifications/notifications.service";
 import { sendPush } from "../utils/push";
+import { InvoicesService } from "../invoices/invoices.service";
 
 
 @Controller("jobs")
@@ -24,6 +25,7 @@ export class JobController {
   constructor(
     private prisma: PrismaService,
     private notificationsService: NotificationsService,
+    private invoicesService: InvoicesService, // ✅ ADD THIS
 
   ) {}
 @Post(":id/start")
@@ -100,6 +102,19 @@ if (user?.pushToken) {
   return updated;
 }
 
+@Get(":id/invoice-draft")
+@UseGuards(JwtGuard)
+async getInvoiceDraftFromJob(
+  @Param("id") id: string,
+  @Req() req: any
+) {
+  return this.invoicesService.getInvoicePreview(
+    id,
+    req.user.companyId
+  );
+}
+
+
 
 @Post(":id/end")
 @UseGuards(JwtGuard)
@@ -160,6 +175,75 @@ async endJob(@Req() req: any, @Param("id") jobId: string) {
 
   return updated;
 }
+@Post(":id/cancel")
+@UseGuards(JwtGuard)
+async cancelJob(@Req() req: any, @Param("id") jobId: string) {
+
+  // 🔐 Only OWNER / MANAGER
+  if (!["OWNER", "MANAGER"].includes(req.user.role)) {
+    throw new ForbiddenException("Only owner or manager can cancel jobs");
+  }
+
+  const job = await this.prisma.job.findUnique({
+    where: { id: jobId },
+    include: {
+      employees: true,
+    },
+  });
+
+  if (!job) {
+    throw new NotFoundException("Job not found");
+  }
+
+  // ❌ Already final
+  if (["COMPLETED", "CANCELLED"].includes(job.status)) {
+    throw new ForbiddenException("Job is already finalized");
+  }
+
+  // 🟡 Cancel job
+  const cancelledJob = await this.prisma.job.update({
+    where: { id: jobId },
+    data: {
+      status: "CANCELLED",
+      endedAt: new Date(),
+    },
+  });
+
+  // 🧹 Unassign all employees
+  await this.prisma.jobEmployee.deleteMany({
+    where: { jobId },
+  });
+
+  // 🔔 Notify employees
+  await Promise.all(
+    job.employees.map(async (e) => {
+      await this.notificationsService.createEmployeeNotification({
+        employeeId: e.employeeId,
+        companyId: job.companyId,
+        title: "Job Cancelled",
+        message: `Job #${job.jobNumber} has been cancelled`,
+        type: "JOB_CANCELLED",
+        jobId: job.id,
+      });
+
+      const user = await this.prisma.user.findFirst({
+        where: { employee: { id: e.employeeId } },
+        select: { pushToken: true },
+      });
+
+      if (user?.pushToken) {
+        await sendPush(
+          user.pushToken,
+          "Job Cancelled",
+          `Job #${job.jobNumber} has been cancelled`,
+          job.id
+        );
+      }
+    })
+  );
+
+  return cancelledJob;
+}
 
 
 @Get()
@@ -169,22 +253,26 @@ async getJobs(
   @Query("status") status?: JobStatus
 ) {
   if (req.user.role === "EMPLOYEE") {
-  const rows = await this.prisma.jobEmployee.findMany({
-    where: {
-      employeeId: req.user.employeeId,
-      job: status ? { status } : undefined,
+ const rows = await this.prisma.jobEmployee.findMany({
+  where: {
+    employeeId: req.user.employeeId,
+    job: {
+      companyId: req.user.companyId,   // 🔐 IMPORTANT
+      ...(status ? { status } : {}),
     },
-    include: {
-      job: {
-        include: {
-          quotation: { include: { customer: true } },
-        },
+  },
+  include: {
+    job: {
+      include: {
+        quotation: { include: { customer: true } },
       },
     },
-    orderBy: {
-      job: { createdAt: "desc" },
-    },
-  });
+  },
+  orderBy: {
+    job: { createdAt: "desc" },
+  },
+});
+
 
   return rows.map(r => {
   const job = r.job;
@@ -233,16 +321,18 @@ async getJobs(
 
 
 const jobs = await this.prisma.job.findMany({
-  where: status ? { status } : {},
+  where: {
+    companyId: req.user.companyId,   // 🔒 MAIN FIX
+    ...(status ? { status } : {}),
+  },
   include: {
     quotation: {
-      include: {
-        customer: true,
-      },
+      include: { customer: true },
     },
   },
   orderBy: { createdAt: "desc" },
 });
+
 
 return jobs.map(job => {
   const q = job.quotation;

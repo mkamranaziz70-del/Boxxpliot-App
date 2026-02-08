@@ -5,7 +5,7 @@ import {
   NotFoundException,
   Res,
 } from "@nestjs/common";
-import { PrismaService } from "../../prisma/prisma.service";
+import { PrismaService } from "../../../prisma/prisma.service";
 import type { Response } from "express";
 
 @Controller("public/quotation")

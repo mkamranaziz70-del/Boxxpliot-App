@@ -1,10 +1,12 @@
 import { Module } from "@nestjs/common";
-import { PrismaService } from "../../../prisma/prisma.service";
-import { PublicQuotationController } from "../../public-quotation/public-quotation.controller";
-import { PublicSignController } from "../../public-quotation/public-signin.controller";
+import { PublicQuotationController } from "./public-quotation.controller";
+import { PublicSignController } from "./public-signin.controller";
+import { PrismaService } from "../../../prisma/prisma.service";  // DIRECT SERVICE
+import { PdfService } from "../../pdf/pdf.service";              // DIRECT SERVICE
+import { MailService } from "../../mail/mail.service";          // DIRECT SERVICE
 
 @Module({
-  controllers: [PublicQuotationController,PublicSignController], 
-  providers: [PrismaService],
+  providers: [PrismaService, PdfService, MailService],     // 🔥 NO MODULE IMPORTS
+  controllers: [PublicQuotationController, PublicSignController],
 })
 export class PublicModule {}

@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { CustomersService } from './customers.service';
 import { JwtGuard } from '../auth/auth1/jwt.guard'; 
+import { Param } from '@nestjs/common';
 
 @Controller('customers')
 @UseGuards(JwtGuard) 
@@ -23,4 +24,10 @@ export class CustomersController {
   findAll(@Req() req) {
     return this.customersService.findAll(req.user.companyId);
   }
+
+  @Get(':id')
+findOne(@Req() req, @Param('id') id: string) {
+  return this.customersService.findOne(req.user.companyId, id);
+}
+
 }
