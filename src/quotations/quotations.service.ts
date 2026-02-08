@@ -7,13 +7,16 @@ import { PrismaService } from "../../prisma/prisma.service";
 import { randomUUID } from "crypto";
 import * as nodemailer from "nodemailer";
 import Twilio from "twilio";
+import { Prisma } from "@prisma/client";
+import { PdfService } from "../pdf/pdf.service";
 
 @Injectable()
 export class QuotationsService {
   private mailer?: nodemailer.Transporter;
   private twilio?: any;
 
-  constructor(private prisma: PrismaService) {
+  constructor(private prisma: PrismaService,    private pdfService: PdfService, // 👈 MUST be here
+) {
     if (
       process.env.SMTP_HOST &&
       process.env.SMTP_USER &&
@@ -42,40 +45,46 @@ export class QuotationsService {
   }
 
   
-  async createQuote(user: any, data: any) {
-    if (!data.customerId)
-      throw new BadRequestException("Customer is required");
+ async createQuote(user: any, data: any) {
+  if (!data.customerId)
+    throw new BadRequestException("Customer is required");
+  if (!data.serviceType)
+    throw new BadRequestException("Service type is required");
 
-    const last = await this.prisma.quotation.findFirst({
-      where: { companyId: user.companyId },
-      orderBy: { quoteNumber: "desc" },
-    });
+  return this.prisma.quotation.create({
+    data: {
+      quoteNumber: null,          // 👈 NEVER generate here
+      status: "IN_PROGRESS",
+      customerId: data.customerId,
+      movingDate: data.movingDate ? new Date(data.movingDate) : null,
+      startTime: data.startTime || null,
+      serviceType: data.serviceType,
+      companyId: user.companyId,
+      createdById: user.id,
+      workers: 1,
+      trucks: 1,
+      pricingMethod: "HOURLY",
+      total: 0,
+    },
+  });
+}
 
-    const nextQuoteNumber = last ? last.quoteNumber + 1 : 1001;
+private async generateQuoteNumber(companyId: string): Promise<number> {
+  const last = await this.prisma.quotation.findFirst({
+    where: {
+      companyId,
+      quoteNumber: { not: null },
+    },
+    orderBy: { quoteNumber: "desc" },
+  });
 
-    return this.prisma.quotation.create({
-      data: {
-        quoteNumber: nextQuoteNumber,
-        status: "DRAFT",
-
-        customerId: data.customerId,
-movingDate: data.movingDate
-  ? new Date(data.movingDate)
-  : null,
-startTime: data.startTime || null,
-
-        serviceType: data.serviceType,
-
-        companyId: user.companyId,
-        createdById: user.id,
-
-        workers: 1,
-        trucks: 1,
-        pricingMethod: "HOURLY",
-        total: 0,
-      },
-    });
+  if (!last || last.quoteNumber === null) {
+    return 1001;
   }
+
+  return last.quoteNumber + 1;
+}
+
 
 async updateQuote(user: any, id: string, data: any) {
   const quote = await this.prisma.quotation.findFirst({
@@ -83,8 +92,11 @@ async updateQuote(user: any, id: string, data: any) {
   });
 
   if (!quote) throw new NotFoundException("Quotation not found");
-  if (quote.status !== "DRAFT")
-    throw new BadRequestException("Only draft quotations can be edited");
+ if (!["IN_PROGRESS", "DRAFT"].includes(quote.status)) {
+  throw new BadRequestException("Quotation cannot be edited");
+}
+  delete data.status;
+
 
   const safe = (v: any) =>
     typeof v === "number" && !isNaN(v) ? v : undefined;
@@ -141,7 +153,14 @@ const endAt = new Date(
   }
 }
 
-
+const inventoryItems =
+  data.inventoryItems ??
+  (Array.isArray(data.inventory)
+    ? data.inventory.reduce(
+        (sum: number, i: any) => sum + (i.quantity || 0),
+        0
+      )
+    : undefined);
   return this.prisma.quotation.update({
     where: { id },
     data: {
@@ -179,6 +198,15 @@ startTime:
       estimatedVolumeCft: safe(data.estimatedVolumeCft),
       estimatedWeightLbs: safe(data.estimatedWeightLbs),
       inventoryNotes: data.inventoryNotes,
+inventoryJson:
+  Array.isArray(data.inventory)
+    ? data.inventory
+    : undefined,
+
+inventoryItems:
+  typeof inventoryItems === "number"
+    ? inventoryItems
+    : undefined,
 
       pickupAddress: data.pickupAddress,
       pickupUnit: data.pickupUnit,
@@ -211,19 +239,44 @@ dropoffFloor:
     },
   });
 }
+async saveDraft(user: any, id: string) {
+  const quote = await this.prisma.quotation.findFirst({
+    where: { id, companyId: user.companyId },
+  });
 
+  if (!quote) throw new NotFoundException("Quotation not found");
+  if (quote.status !== "IN_PROGRESS")
+    throw new BadRequestException("Only in-progress quotations can be saved");
+
+  const quoteNumber =
+    quote.quoteNumber ?? (await this.generateQuoteNumber(user.companyId));
+
+  return this.prisma.quotation.update({
+    where: { id },
+    data: {
+      status: "DRAFT",
+      quoteNumber,   // 👈 FINAL HERE
+    },
+  });
+}
 async sendQuote(user: any, id: string) {
+  // 🔍 1️⃣ FETCH QUOTATION
   const quote = await this.prisma.quotation.findFirst({
     where: { id, companyId: user.companyId },
     include: { customer: true, company: true },
   });
 
-  if (!quote) throw new NotFoundException("Quotation not found");
-  if (quote.status !== "DRAFT")
-    throw new BadRequestException("Only draft quotations can be sent");
+  if (!quote) {
+    throw new NotFoundException("Quotation not found");
+  }
 
-  if (!quote.validityDays)
+  if (!["IN_PROGRESS", "DRAFT"].includes(quote.status)) {
+    throw new BadRequestException("Quotation cannot be sent");
+  }
+
+  if (!quote.validityDays) {
     throw new BadRequestException("Validity period missing");
+  }
 
   if (!quote.startAt || !quote.endAt) {
     throw new BadRequestException(
@@ -231,62 +284,109 @@ async sendQuote(user: any, id: string) {
     );
   }
 
+  // 🔢 2️⃣ FINAL QUOTE NUMBER
+  const quoteNumber =
+    quote.quoteNumber ?? (await this.generateQuoteNumber(user.companyId));
+
+  // ⏳ 3️⃣ EXPIRY DATE
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + quote.validityDays);
 
+  // 🔗 4️⃣ PUBLIC LINK
   const token = randomUUID();
   const publicLink = `${process.env.APP_PUBLIC_URL}/public/quotation/${token}`;
 
+  // 🧾 5️⃣ GENERATE PDF (ABSOLUTE + URL)
+ // 🧾 5️⃣ GENERATE PDF (ABSOLUTE + URL)
+const pdf = await this.pdfService.generateQuotationPdf({
+  quoteNumber,
+  quote,
+  customer: quote.customer,
+  company: {
+    ...quote.company,
+    logoUrl: `${process.env.APP_PUBLIC_URL}/uploads/company-logo.jpeg`,
+  },
+  signed: false,
+});
+
+  // pdf = { url, absolutePath }
+
+  // 🧠 6️⃣ UPDATE QUOTATION (SINGLE SOURCE OF TRUTH)
   const updated = await this.prisma.quotation.update({
     where: { id },
     data: {
       status: "SENT",
+      quoteNumber,
       publicToken: token,
       sentAt: new Date(),
-      expiresAt
+      expiresAt,
+      sentPdfUrl: pdf.url,
+      pdfGeneratedAt: new Date(),
     },
   });
 
-  const lastJob = await this.prisma.job.findFirst({
-    where: { companyId: user.companyId },
-    orderBy: { jobNumber: "desc" },
-  });
-  const nextJobNumber = lastJob ? lastJob.jobNumber + 1 : 1001;
-
-  await this.prisma.job.create({
-    data: {
-      jobNumber: nextJobNumber,
-      title: `${quote.customer?.fullName || "Customer"} Move`,
-      status: "PENDING",
-      companyId: user.companyId,
-      quotationId: updated.id,   
-    }
-  });
-
+  // 📧 8️⃣ SEND EMAIL WITH PDF ATTACHMENT
   if (this.mailer && quote.customer?.email) {
     await this.mailer.sendMail({
+      from: `"BoxxPilot" <${process.env.SMTP_USER}>`,
       to: quote.customer.email,
       subject: `Quotation #${updated.quoteNumber}`,
       html: `
         <p>Hello ${quote.customer.fullName},</p>
+
         <p>Your moving quotation is ready.</p>
-        <p><a href="${publicLink}">View Quotation</a></p>
-        <p>Valid until ${expiresAt.toDateString()}</p>
+
+        <p>
+          <a href="${publicLink}" style="
+            display:inline-block;
+            padding:12px 18px;
+            background:#2563EB;
+            color:#ffffff;
+            border-radius:6px;
+            text-decoration:none;
+            font-weight:600;
+          ">
+            View & Sign Quotation
+          </a>
+        </p>
+
+        <p style="margin-top:12px">
+          Valid until <b>${expiresAt.toDateString()}</b>
+        </p>
+
+        <p style="color:#6B7280;font-size:13px;margin-top:24px">
+          — BoxxPilot
+        </p>
       `,
+      attachments: [
+        {
+          filename: `Quotation-${updated.quoteNumber}.pdf`,
+          path: pdf.absolutePath, // ✅ REAL FILE PATH
+        },
+      ],
     });
   }
 
+  // ✅ 9️⃣ FINAL RESPONSE
   return {
     success: true,
     quoteNumber: updated.quoteNumber,
     link: publicLink,
     expiresAt,
+    pdfUrl: pdf.url,
   };
 }
 
+
+
   async getAllQuotes(user: any) {
     return this.prisma.quotation.findMany({
-      where: { companyId: user.companyId },
+where: {
+  companyId: user.companyId,
+  status: {
+    in: ["DRAFT", "SENT", "SIGNED", "REJECTED", "EXPIRED"],
+  },
+},
       orderBy: { updatedAt: "desc" },
       include: {
         customer: {
@@ -314,12 +414,232 @@ async sendQuote(user: any, id: string) {
     if (!quote) throw new NotFoundException("Quotation not found");
     return quote;
   }
+
+
+async duplicateQuote(user: any, id: string) {
+  const quote = await this.getQuoteById(user, id);
+
+  return this.prisma.quotation.create({
+    data: {
+      companyId: user.companyId,
+      customerId: quote.customerId,
+      createdById: user.id,
+
+      status: "IN_PROGRESS",
+      quoteNumber: null,
+
+      movingDate: quote.movingDate,
+      startTime: quote.startTime,
+      serviceType: quote.serviceType,
+
+      workers: quote.workers,
+      trucks: quote.trucks,
+      truckSize: quote.truckSize,
+
+      pricingMethod: quote.pricingMethod,
+      hourlyRate: quote.hourlyRate,
+      fixedPrice: quote.fixedPrice,
+
+      travelCost: quote.travelCost,
+      materialsCost: quote.materialsCost,
+      otherFees: quote.otherFees,
+      discount: quote.discount,
+
+      taxTPS: quote.taxTPS,
+      taxTVQ: quote.taxTVQ,
+      total: quote.total,
+
+      estimatedVolumeCft: quote.estimatedVolumeCft,
+      estimatedWeightLbs: quote.estimatedWeightLbs,
+inventoryJson:
+  quote.inventoryJson ?? Prisma.DbNull,
+      inventoryItems: quote.inventoryItems,
+      inventoryNotes: quote.inventoryNotes,
+
+      pickupAddress: quote.pickupAddress,
+      pickupUnit: quote.pickupUnit,
+      pickupFloor: quote.pickupFloor,
+      pickupElevator: quote.pickupElevator,
+      pickupLoadingDock: quote.pickupLoadingDock,
+      pickupAccessNotes: quote.pickupAccessNotes,
+
+      dropoffAddress: quote.dropoffAddress,
+      dropoffUnit: quote.dropoffUnit,
+      dropoffFloor: quote.dropoffFloor,
+      dropoffElevator: quote.dropoffElevator,
+      dropoffLoadingDock: quote.dropoffLoadingDock,
+      dropoffAccessNotes: quote.dropoffAccessNotes,
+
+      notes: quote.notes,
+      termsText: quote.termsText,
+      internalNotes: quote.internalNotes,
+    },
+  });
+}
+
+
+async archiveQuote(user: any, id: string) {
+  const quote = await this.prisma.quotation.findFirst({
+    where: { id, companyId: user.companyId },
+  });
+
+  if (!quote) throw new NotFoundException("Quotation not found");
+
+  if (quote.status === "SIGNED") {
+    throw new BadRequestException("Signed quotations cannot be archived");
+  }
+
+  return this.prisma.quotation.update({
+    where: { id },
+    data: { status: "ARCHIVED" },
+  });
+}
+
+async renewQuote(user: any, id: string) {
+  const quote = await this.prisma.quotation.findFirst({
+    where: { id, companyId: user.companyId },
+  });
+
+  if (!quote) throw new NotFoundException("Quotation not found");
+
+  if (quote.status !== "EXPIRED") {
+    throw new BadRequestException("Only expired quotations can be renewed");
+  }
+
+  return this.prisma.quotation.create({
+    data: {
+      companyId: user.companyId,
+      customerId: quote.customerId,
+      createdById: user.id,
+
+      status: "IN_PROGRESS",
+      quoteNumber: null,
+
+      movingDate: quote.movingDate,
+      startTime: quote.startTime,
+      serviceType: quote.serviceType,
+
+      workers: quote.workers,
+      trucks: quote.trucks,
+      truckSize: quote.truckSize,
+
+      pricingMethod: quote.pricingMethod,
+      hourlyRate: quote.hourlyRate,
+      fixedPrice: quote.fixedPrice,
+
+      travelCost: quote.travelCost,
+      materialsCost: quote.materialsCost,
+      otherFees: quote.otherFees,
+      discount: quote.discount,
+
+      taxTPS: quote.taxTPS,
+      taxTVQ: quote.taxTVQ,
+      total: quote.total,
+
+      estimatedVolumeCft: quote.estimatedVolumeCft,
+      estimatedWeightLbs: quote.estimatedWeightLbs,
+
+      inventoryJson:
+        quote.inventoryJson ?? Prisma.DbNull,
+      inventoryItems: quote.inventoryItems ?? undefined,
+      inventoryNotes: quote.inventoryNotes,
+
+      pickupAddress: quote.pickupAddress,
+      pickupUnit: quote.pickupUnit,
+      pickupFloor: quote.pickupFloor,
+      pickupElevator: quote.pickupElevator,
+      pickupLoadingDock: quote.pickupLoadingDock,
+      pickupAccessNotes: quote.pickupAccessNotes,
+
+      dropoffAddress: quote.dropoffAddress,
+      dropoffUnit: quote.dropoffUnit,
+      dropoffFloor: quote.dropoffFloor,
+      dropoffElevator: quote.dropoffElevator,
+      dropoffLoadingDock: quote.dropoffLoadingDock,
+      dropoffAccessNotes: quote.dropoffAccessNotes,
+
+      notes: quote.notes,
+      termsText: quote.termsText,
+      internalNotes: quote.internalNotes,
+      validityDays: quote.validityDays,
+    },
+  });
+}
+
+async sendReminder(user: any, id: string) {
+  const quote = await this.prisma.quotation.findFirst({
+    where: { id, companyId: user.companyId },
+    include: {
+      customer: true,
+      company: true,
+    },
+  });
+
+  if (!quote) throw new NotFoundException("Quotation not found");
+
+  if (quote.status !== "SENT") {
+    throw new BadRequestException("Reminder allowed only for sent quotations");
+  }
+
+  // 🔒 PLAN CHECK
+  if (!["PRO", "ELITE"].includes(quote.company.plan)) {
+    throw new BadRequestException(
+      "Reminders are available only on Pro or Elite plans"
+    );
+  }
+
+  // 🛑 Throttle: 1 reminder / 24h
+  if (
+    quote.lastReminderAt &&
+    Date.now() - quote.lastReminderAt.getTime() < 24 * 60 * 60 * 1000
+  ) {
+    throw new BadRequestException(
+      "Reminder already sent in last 24 hours"
+    );
+  }
+
+  // 📩 EMAIL
+  if (this.mailer && quote.customer?.email) {
+    await this.mailer.sendMail({
+      to: quote.customer.email,
+      subject: `Reminder: Quotation #${quote.quoteNumber}`,
+      html: `
+        <p>Hello ${quote.customer.fullName},</p>
+        <p>This is a reminder regarding your moving quotation.</p>
+        <p>Please review and sign if you wish to proceed.</p>
+      `,
+    });
+  }
+
+  // 📱 SMS
+  if (this.twilio && quote.customer?.phone) {
+    await this.twilio.messages.create({
+      to: quote.customer.phone,
+      from: process.env.TWILIO_NUMBER,
+      body: `Reminder: Your quotation #${quote.quoteNumber} is awaiting your response.`,
+    });
+  }
+
+  // 📝 SAVE LOG
+  await this.prisma.quotation.update({
+    where: { id },
+    data: { lastReminderAt: new Date() },
+  });
+
+  return { success: true };
+}
+
+
+
   async deleteQuote(user: any, id: string) {
     const quote = await this.prisma.quotation.findFirst({
       where: { id, companyId: user.companyId },
     });
 
     if (!quote) throw new NotFoundException("Quotation not found");
+if (["SENT", "SIGNED"].includes(quote.status)) {
+  throw new BadRequestException("Cannot delete sent quotations");
+}
 
     await this.prisma.quotation.delete({ where: { id } });
     return { success: true };

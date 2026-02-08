@@ -35,6 +35,7 @@ export class EmployeesController {
         phone: true,
         position: true,
         status: true,
+        
       },
     });
   }

@@ -183,9 +183,10 @@ async login(@Body() body: any) {
 
   const user = await this.prisma.user.findUnique({
     where: { email: email.toLowerCase() },
-    include: { company: true },
+    include: { company: true ,    employee: true,  },
   });
 
+  
   if (!user) {
     throw new UnauthorizedException('Invalid credentials');
   }
@@ -226,6 +227,8 @@ async login(@Body() body: any) {
       id: user.id,
       fullName: user.fullName,
       role: user.role,
+      avatarUrl: user.avatarUrl, // 🔥 ADD THIS LINE
+
     },
     company: {
       id: user.company.id,
